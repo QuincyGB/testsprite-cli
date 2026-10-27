@@ -577,10 +577,12 @@ describe('agent --dir naming a file', () => {
     expect((thrown as ApiError).nextAction).toContain('is a file');
   });
 
-  it('translates an ENOTDIR raised under a symlinked root component into exit 5', async () => {
+  it('rejects a root passing through a symlink to a file — exit 5', async () => {
     // A root passing through a symlink to a FILE: lstat sees the link itself
-    // (not a file), and lstat-ing the next component raises ENOTDIR — the
-    // exact shape the real fs produces for `--dir link-to-file/sub`.
+    // (not a file), so the walk resolves the link with stat, which follows
+    // it to the regular file — the shape the real fs produces for
+    // `--dir link-to-file/sub`. (lstat-ing the next component would raise
+    // ENOTDIR, but the stat check on the link itself fires first.)
     const enotdirFs: AgentFs = {
       async lstat(p: string) {
         if (p === '/proj') return { isFile: false, isSymbolicLink: false };
@@ -589,7 +591,8 @@ describe('agent --dir naming a file', () => {
           code: 'ENOTDIR',
         });
       },
-      async stat() {
+      async stat(p: string) {
+        if (p === '/proj/link') return { isFile: true };
         throw new Error('unreachable');
       },
       async readFile() {
@@ -616,7 +619,7 @@ describe('agent --dir naming a file', () => {
 
     expect(thrown).toBeInstanceOf(ApiError);
     expect((thrown as ApiError).exitCode).toBe(5);
-    expect((thrown as ApiError).nextAction).toContain('passes through a file');
+    expect((thrown as ApiError).nextAction).toContain('is a symlink to a file');
   });
 
   it('still installs when --dir is a symlink to a directory', async () => {
@@ -1769,6 +1772,179 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
       expect((thrown as ApiError).exitCode).toBe(5);
       expect((thrown as ApiError).nextAction).toContain('symlink to a file');
+    },
+  );
+
+  // Regression: the symlink resolution above must apply to INTERMEDIATE
+  // components too, not just the final one. A lookup beneath a dangling
+  // intermediate link returns ENOENT, which the walk reads as a missing
+  // tail — so `--dir link/sub` with `link` dangling used to pass the guard
+  // and crash later with a raw ENOTDIR (install) or sail into status
+  // classification. It must fail up front as VALIDATION_ERROR (exit 5).
+  it.skipIf(process.platform === 'win32')(
+    'rejects --dir passing through an intermediate dangling symlink (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-dangling-'));
+      // `link` points at a target that does not exist; --dir passes through it.
+      const missingTarget = path.join(tmpRoot, 'missing-target');
+      symlinkSync(missingTarget, path.join(tmpRoot, 'link'), 'dir');
+      const dir = path.join(tmpRoot, 'link', 'sub');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runInstall(
+          {
+            profile: 'default',
+            output: 'text',
+            debug: false,
+            dryRun: false,
+            target: ['claude'],
+            skills: ['testsprite-verify'],
+            force: false,
+            dir,
+          },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a path that does not exist');
+      // Install never proceeded: the dangling target was not created.
+      expect(existsSync(missingTarget)).toBe(false);
+    },
+  );
+
+  // Same intermediate-dangling regression through `agent status`.
+  it.skipIf(process.platform === 'win32')(
+    'runStatus rejects --dir passing through an intermediate dangling symlink (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-dangling-status-'));
+      const missingTarget = path.join(tmpRoot, 'missing-target');
+      symlinkSync(missingTarget, path.join(tmpRoot, 'link'), 'dir');
+      const dir = path.join(tmpRoot, 'link', 'sub');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runStatus(
+          { profile: 'default', output: 'text', debug: false, dryRun: false, dir },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a path that does not exist');
+    },
+  );
+
+  // An intermediate symlink to a regular FILE is rejected at the link
+  // itself ("is a symlink to a file"), before any lookup beneath it.
+  it.skipIf(process.platform === 'win32')(
+    'rejects --dir passing through an intermediate symlink to a regular file (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-file-'));
+      const nodeFs = await import('node:fs/promises');
+      const targetFile = path.join(tmpRoot, 'afile');
+      await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      symlinkSync(targetFile, path.join(tmpRoot, 'link'), 'file');
+      const dir = path.join(tmpRoot, 'link', 'sub');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runInstall(
+          {
+            profile: 'default',
+            output: 'text',
+            debug: false,
+            dryRun: false,
+            target: ['claude'],
+            skills: ['testsprite-verify'],
+            force: false,
+            dir,
+          },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a file');
+      // The file the link points at is untouched.
+      expect(readFileSync(targetFile, 'utf8')).toBe('not a directory');
+    },
+  );
+
+  // Same intermediate symlink-to-file regression through `agent status`.
+  it.skipIf(process.platform === 'win32')(
+    'runStatus rejects --dir passing through an intermediate symlink to a regular file (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-file-status-'));
+      const nodeFs = await import('node:fs/promises');
+      const targetFile = path.join(tmpRoot, 'afile');
+      await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      symlinkSync(targetFile, path.join(tmpRoot, 'link'), 'file');
+      const dir = path.join(tmpRoot, 'link', 'sub');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runStatus(
+          { profile: 'default', output: 'text', debug: false, dryRun: false, dir },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a file');
+    },
+  );
+
+  // Positive control: an intermediate symlink to a DIRECTORY stays allowed —
+  // install proceeds through it and lands in the real target directory.
+  it.skipIf(process.platform === 'win32')(
+    'still installs when --dir passes through an intermediate symlink to a directory (real disk)',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-dir-'));
+      const nodeFs = await import('node:fs/promises');
+      const realDir = path.join(tmpRoot, 'realdir');
+      await nodeFs.mkdir(realDir);
+      symlinkSync(realDir, path.join(tmpRoot, 'link'), 'dir');
+      const dir = path.join(tmpRoot, 'link', 'sub');
+      const { deps } = makeCapture();
+
+      await runInstall(
+        {
+          profile: 'default',
+          output: 'text',
+          debug: false,
+          dryRun: false,
+          target: ['claude'],
+          skills: ['testsprite-verify'],
+          force: false,
+          dir,
+        },
+        { ...deps }, // no fs injected → uses defaultAgentFs
+      );
+
+      const { path: relPath, content } = renderForTarget('claude', 'testsprite-verify');
+      expect(readFileSync(path.join(realDir, 'sub', relPath), 'utf8')).toBe(content);
     },
   );
 });

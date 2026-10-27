@@ -47,8 +47,8 @@ export interface AgentFs {
   // path-safety walk — fs writes follow symlinks, so we must be able to see them.
   lstat(p: string): Promise<{ isFile: boolean; isSymbolicLink: boolean } | null>;
   // stat semantics: FOLLOWS symlinks (null = ENOENT) — resolves what a path
-  // ultimately points at. Used to check the target of a final `--dir` symlink,
-  // which lstat alone cannot see through.
+  // ultimately points at. Used to check the target of every `--dir` symlink
+  // component, which lstat alone cannot see through.
   stat(p: string): Promise<{ isFile: boolean } | null>;
   readFile(p: string): Promise<string>;
   // exclusive: fail with EEXIST if the path already exists. O_EXCL|O_CREAT does
@@ -154,11 +154,14 @@ async function inspectTargetPath(
  * resolved through a file, e.g. a symlink to one) is the same error, and a
  * missing component ends the walk — the tail does not exist yet and install
  * may create it. Symlink components pointing at directories stay allowed,
- * exactly as today. The final component gets one extra check: `lstat`
- * reports a link itself, never its target, so a root that IS a symlink is
- * resolved with `stat` — a target that is a regular file, or one that does
- * not exist at all, is the same validation error instead of a later raw
- * `ENOTDIR` crash under the unresolved link.
+ * exactly as today. Every symlink component gets one extra check: `lstat`
+ * reports a link itself, never its target, so each link is resolved with
+ * `stat` — a target that is a regular file, or one that does not exist at
+ * all, is the same validation error instead of a later raw `ENOTDIR` crash
+ * under the unresolved link. This must apply to intermediate links too,
+ * not just the final component: a lookup beneath a dangling intermediate
+ * link returns `ENOENT`, which the walk would otherwise read as a missing
+ * tail and wave through, leaving the raw crash to surface downstream.
  */
 async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void> {
   const { root: anchor } = path.parse(root);
@@ -167,7 +170,7 @@ async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void>
     .split(/[/\\]+/)
     .filter(Boolean);
   let current = anchor;
-  for (const [i, seg] of segments.entries()) {
+  for (const seg of segments) {
     current = path.join(current, seg);
     let ls: Awaited<ReturnType<AgentFs['lstat']>>;
     try {
@@ -184,14 +187,15 @@ async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void>
     if (ls.isFile) {
       throw localValidationError('dir', `must be a directory: "${current}" is a file`);
     }
-    if (ls.isSymbolicLink && i === segments.length - 1) {
-      // The root itself is a symlink: the isFile check above saw the link,
-      // not its target, so a link to a regular file would slip through and
-      // the first lookup beneath it would raise the raw ENOTDIR this walk
-      // exists to prevent. Resolve the target — only a directory target is
-      // a usable root; a file target or a dangling link is a validation
-      // error. (Intermediate links need no such check: a link to a file in
-      // a non-final component surfaces as the ENOTDIR handled above.)
+    if (ls.isSymbolicLink) {
+      // A symlink component: the isFile check above saw the link, not its
+      // target, so a link to a regular file would slip through and the
+      // first lookup beneath it would raise the raw ENOTDIR this walk
+      // exists to prevent. Resolve the target — only a directory target
+      // is a usable path component; a file target or a dangling link is
+      // a validation error. Apply this to every link component, not only
+      // the final one: lookups beneath a dangling link return ENOENT,
+      // which the walk would otherwise read as a missing tail.
       let st: Awaited<ReturnType<AgentFs['stat']>>;
       try {
         st = await agentFs.stat(current);
