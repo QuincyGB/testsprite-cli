@@ -118,6 +118,11 @@ function makeMemFs(): {
       if (dirs.has(p)) return { isFile: false, isSymbolicLink: false };
       return null;
     },
+    async stat(p: string) {
+      if (store.has(p)) return { isFile: true };
+      if (dirs.has(p)) return { isFile: false };
+      return null;
+    },
     async readFile(p: string) {
       const v = store.get(p);
       if (v === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
@@ -1974,6 +1979,9 @@ describe('[B-E2E-06] runInit: install failure → info message on stderr + re-th
     // Inject an AgentFs that throws on writeFile to simulate install failure
     const failFs: AgentFs = {
       async lstat() {
+        return null;
+      },
+      async stat() {
         return null;
       },
       async readFile() {

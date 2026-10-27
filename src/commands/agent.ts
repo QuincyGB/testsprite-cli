@@ -46,6 +46,10 @@ export interface AgentFs {
   // lstat semantics: does NOT follow symlinks (null = ENOENT). Critical for the
   // path-safety walk — fs writes follow symlinks, so we must be able to see them.
   lstat(p: string): Promise<{ isFile: boolean; isSymbolicLink: boolean } | null>;
+  // stat semantics: FOLLOWS symlinks (null = ENOENT) — resolves what a path
+  // ultimately points at. Used to check the target of a final `--dir` symlink,
+  // which lstat alone cannot see through.
+  stat(p: string): Promise<{ isFile: boolean } | null>;
   readFile(p: string): Promise<string>;
   // exclusive: fail with EEXIST if the path already exists. O_EXCL|O_CREAT does
   // not follow a final symlink, so exclusive writes never clobber or traverse a
@@ -59,6 +63,17 @@ const defaultAgentFs: AgentFs = {
     try {
       const s = await fs.lstat(p);
       return { isFile: s.isFile(), isSymbolicLink: s.isSymbolicLink() };
+    } catch (err: unknown) {
+      if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw err;
+    }
+  },
+  async stat(p: string): Promise<{ isFile: boolean } | null> {
+    try {
+      const s = await fs.stat(p);
+      return { isFile: s.isFile() };
     } catch (err: unknown) {
       if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         return null;
@@ -139,7 +154,11 @@ async function inspectTargetPath(
  * resolved through a file, e.g. a symlink to one) is the same error, and a
  * missing component ends the walk — the tail does not exist yet and install
  * may create it. Symlink components pointing at directories stay allowed,
- * exactly as today.
+ * exactly as today. The final component gets one extra check: `lstat`
+ * reports a link itself, never its target, so a root that IS a symlink is
+ * resolved with `stat` — a target that is a regular file, or one that does
+ * not exist at all, is the same validation error instead of a later raw
+ * `ENOTDIR` crash under the unresolved link.
  */
 async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void> {
   const { root: anchor } = path.parse(root);
@@ -148,7 +167,7 @@ async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void>
     .split(/[/\\]+/)
     .filter(Boolean);
   let current = anchor;
-  for (const seg of segments) {
+  for (const [i, seg] of segments.entries()) {
     current = path.join(current, seg);
     let ls: Awaited<ReturnType<AgentFs['lstat']>>;
     try {
@@ -164,6 +183,36 @@ async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void>
     }
     if (ls.isFile) {
       throw localValidationError('dir', `must be a directory: "${current}" is a file`);
+    }
+    if (ls.isSymbolicLink && i === segments.length - 1) {
+      // The root itself is a symlink: the isFile check above saw the link,
+      // not its target, so a link to a regular file would slip through and
+      // the first lookup beneath it would raise the raw ENOTDIR this walk
+      // exists to prevent. Resolve the target — only a directory target is
+      // a usable root; a file target or a dangling link is a validation
+      // error. (Intermediate links need no such check: a link to a file in
+      // a non-final component surfaces as the ENOTDIR handled above.)
+      let st: Awaited<ReturnType<AgentFs['stat']>>;
+      try {
+        st = await agentFs.stat(current);
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+          throw localValidationError('dir', `must be a directory: "${root}" passes through a file`);
+        }
+        throw err;
+      }
+      if (st === null) {
+        throw localValidationError(
+          'dir',
+          `must be a directory: "${current}" is a symlink to a path that does not exist`,
+        );
+      }
+      if (st.isFile) {
+        throw localValidationError(
+          'dir',
+          `must be a directory: "${current}" is a symlink to a file`,
+        );
+      }
     }
   }
 }

@@ -63,6 +63,13 @@ function makeMemFs(): {
       if (dirs.has(p)) return { isFile: false, isSymbolicLink: false };
       return null;
     },
+    async stat(p: string) {
+      // Follows symlinks. This model does not track link targets; seeded
+      // symlinks stand for links to directories (see the seedSymlink callers).
+      if (store.has(p)) return { isFile: true };
+      if (dirs.has(p) || symlinks.has(p)) return { isFile: false };
+      return null;
+    },
     async readFile(p: string) {
       const v = store.get(p);
       if (v === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
@@ -581,6 +588,9 @@ describe('agent --dir naming a file', () => {
         throw Object.assign(new Error(`ENOTDIR: not a directory, lstat '${p}'`), {
           code: 'ENOTDIR',
         });
+      },
+      async stat() {
+        throw new Error('unreachable');
       },
       async readFile() {
         throw new Error('unreachable');
@@ -1687,6 +1697,80 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect(readFileSync(outsideFile, 'utf8')).toBe('SECRET');
     },
   );
+
+  // Same Windows symlink-privilege caveat as the tests above.
+  // Regression: `lstat` reports a symlink itself, never its target — a --dir
+  // that IS a symlink to a regular file used to pass the root validation in
+  // assertAgentRootDir and crash later with a raw ENOTDIR. It must fail up
+  // front as VALIDATION_ERROR (exit 5), like a --dir naming the file itself.
+  it.skipIf(process.platform === 'win32')(
+    'rejects --dir naming a symlink to a regular file (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-symlink-root-'));
+      const nodeFs = await import('node:fs/promises');
+      const targetFile = path.join(tmpRoot, 'afile');
+      await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      // --dir IS a symlink whose target is that regular file.
+      const linkDir = path.join(tmpRoot, 'linkdir');
+      symlinkSync(targetFile, linkDir, 'file');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runInstall(
+          {
+            profile: 'default',
+            output: 'text',
+            debug: false,
+            dryRun: false,
+            target: ['claude'],
+            skills: ['testsprite-verify'],
+            force: false,
+            dir: linkDir,
+          },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a file');
+      // The file the link points at is untouched.
+      expect(readFileSync(targetFile, 'utf8')).toBe('not a directory');
+    },
+  );
+
+  // Same regression through `agent status`, which shares the root validation.
+  it.skipIf(process.platform === 'win32')(
+    'runStatus rejects --dir naming a symlink to a regular file (real disk) — VALIDATION_ERROR, exit 5',
+    async () => {
+      const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-symlink-root-status-'));
+      const nodeFs = await import('node:fs/promises');
+      const targetFile = path.join(tmpRoot, 'afile');
+      await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      const linkDir = path.join(tmpRoot, 'linkdir');
+      symlinkSync(targetFile, linkDir, 'file');
+      const { deps } = makeCapture();
+
+      let thrown: unknown;
+      try {
+        await runStatus(
+          { profile: 'default', output: 'text', debug: false, dryRun: false, dir: linkDir },
+          { ...deps }, // no fs injected → uses defaultAgentFs
+        );
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(ApiError);
+      expect((thrown as ApiError).code).toBe('VALIDATION_ERROR');
+      expect((thrown as ApiError).exitCode).toBe(5);
+      expect((thrown as ApiError).nextAction).toContain('symlink to a file');
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1712,6 +1796,7 @@ describe('runInstall — path safety', () => {
       lstat: async () => {
         throw permError;
       },
+      stat: async () => null,
       readFile: async () => '',
       writeFile: async () => undefined,
       mkdir: async () => undefined,
@@ -1937,6 +2022,7 @@ describe('runInstall — backup collision', () => {
     const eexist = Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
     const racyFs: AgentFs = {
       lstat: async () => null, // the path check sees nothing
+      stat: async () => null,
       readFile: async () => '',
       writeFile: async (_p: string, _d: string, o?: { exclusive?: boolean }) => {
         if (o?.exclusive) throw eexist; // but it exists by the time we write
