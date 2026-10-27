@@ -72,6 +72,7 @@ const defaultAgentFs: AgentFs = {
   },
   async stat(p: string): Promise<{ isFile: boolean } | null> {
     try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- p is a component of the user-supplied --dir whose target this stat exists to classify (see assertAgentRootDir); the non-literal path is the subject of the validation.
       const s = await fs.stat(p);
       return { isFile: s.isFile() };
     } catch (err: unknown) {

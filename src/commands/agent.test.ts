@@ -1715,6 +1715,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect(thrown).toBeInstanceOf(CLIError);
       expect((thrown as CLIError).exitCode).toBe(5);
       // The outside file was NOT overwritten (nor clobbered via the .bak path).
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Reads back this test's own fixture file under its mkdtemp directory; no external path input.
       expect(readFileSync(outsideFile, 'utf8')).toBe('SECRET');
     },
   );
@@ -1733,6 +1734,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
       // --dir IS a symlink whose target is that regular file.
       const linkDir = path.join(tmpRoot, 'linkdir');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(targetFile, linkDir, 'file');
       const { deps } = makeCapture();
 
@@ -1760,6 +1762,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect((thrown as ApiError).exitCode).toBe(5);
       expect((thrown as ApiError).nextAction).toContain('symlink to a file');
       // The file the link points at is untouched.
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Reads back this test's own fixture file under its mkdtemp directory; no external path input.
       expect(readFileSync(targetFile, 'utf8')).toBe('not a directory');
     },
   );
@@ -1773,6 +1776,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       const targetFile = path.join(tmpRoot, 'afile');
       await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
       const linkDir = path.join(tmpRoot, 'linkdir');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(targetFile, linkDir, 'file');
       const { deps } = makeCapture();
 
@@ -1805,6 +1809,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-dangling-'));
       // `link` points at a target that does not exist; --dir passes through it.
       const missingTarget = path.join(tmpRoot, 'missing-target');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(missingTarget, path.join(tmpRoot, 'link'), 'dir');
       const dir = path.join(tmpRoot, 'link', 'sub');
       const { deps } = makeCapture();
@@ -1833,6 +1838,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect((thrown as ApiError).exitCode).toBe(5);
       expect((thrown as ApiError).nextAction).toContain('symlink to a path that does not exist');
       // Install never proceeded: the dangling target was not created.
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Checks absence of this test's own dangling-link target under its mkdtemp directory.
       expect(existsSync(missingTarget)).toBe(false);
     },
   );
@@ -1843,6 +1849,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
     async () => {
       const tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-test-mid-dangling-status-'));
       const missingTarget = path.join(tmpRoot, 'missing-target');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(missingTarget, path.join(tmpRoot, 'link'), 'dir');
       const dir = path.join(tmpRoot, 'link', 'sub');
       const { deps } = makeCapture();
@@ -1873,6 +1880,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       const nodeFs = await import('node:fs/promises');
       const targetFile = path.join(tmpRoot, 'afile');
       await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(targetFile, path.join(tmpRoot, 'link'), 'file');
       const dir = path.join(tmpRoot, 'link', 'sub');
       const { deps } = makeCapture();
@@ -1901,6 +1909,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       expect((thrown as ApiError).exitCode).toBe(5);
       expect((thrown as ApiError).nextAction).toContain('symlink to a file');
       // The file the link points at is untouched.
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Reads back this test's own fixture file under its mkdtemp directory; no external path input.
       expect(readFileSync(targetFile, 'utf8')).toBe('not a directory');
     },
   );
@@ -1913,6 +1922,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       const nodeFs = await import('node:fs/promises');
       const targetFile = path.join(tmpRoot, 'afile');
       await nodeFs.writeFile(targetFile, 'not a directory', 'utf8');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(targetFile, path.join(tmpRoot, 'link'), 'file');
       const dir = path.join(tmpRoot, 'link', 'sub');
       const { deps } = makeCapture();
@@ -1943,6 +1953,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       const nodeFs = await import('node:fs/promises');
       const realDir = path.join(tmpRoot, 'realdir');
       await nodeFs.mkdir(realDir);
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Both paths are fixtures this test creates under its own mkdtemp directory; no external path input.
       symlinkSync(realDir, path.join(tmpRoot, 'link'), 'dir');
       const dir = path.join(tmpRoot, 'link', 'sub');
       const { deps } = makeCapture();
@@ -1962,6 +1973,7 @@ describe('runInstall — default AgentFs (real disk)', () => {
       );
 
       const { path: relPath, content } = renderForTarget('claude', 'testsprite-verify');
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- Reads back the file this test just installed under its own mkdtemp directory; no external path input.
       expect(readFileSync(path.join(realDir, 'sub', relPath), 'utf8')).toBe(content);
     },
   );
