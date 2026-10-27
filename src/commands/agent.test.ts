@@ -509,6 +509,119 @@ describe('runInstall — --dir override', () => {
 });
 
 // ---------------------------------------------------------------------------
+// agent --dir naming a file — raw ENOTDIR crash regression
+// ---------------------------------------------------------------------------
+
+describe('agent --dir naming a file', () => {
+  const installOpts = {
+    profile: 'default' as const,
+    output: 'text' as const,
+    debug: false,
+    dryRun: false,
+    target: ['claude'],
+    skills: ['testsprite-verify'],
+    force: false,
+  };
+
+  it.each([
+    ['the file itself', '/test-project/afile'],
+    ['a path through the file', '/test-project/afile/sub'],
+  ])('runInstall rejects --dir naming %s: exit 5, nothing written', async (_label, dir) => {
+    const { store, fs: agentFs, writeCalls, seedFile } = makeMemFs();
+    seedFile('/test-project/afile', 'not a directory');
+    const { deps } = makeCapture();
+
+    let thrown: unknown;
+    try {
+      await runInstall({ ...installOpts, dir }, { cwd: CWD, fs: agentFs, ...deps });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ApiError);
+    expect((thrown as ApiError).exitCode).toBe(5);
+    expect((thrown as ApiError).nextAction).toContain('--dir');
+    expect((thrown as ApiError).nextAction).toContain('is a file');
+    expect(writeCalls.length).toBe(0);
+    expect(store.size).toBe(1); // only the seeded file
+  });
+
+  it.each([
+    ['the file itself', '/test-project/afile'],
+    ['a path through the file', '/test-project/afile/sub/deeper'],
+  ])('runStatus rejects --dir naming %s: exit 5', async (_label, dir) => {
+    const { fs: agentFs, seedFile } = makeMemFs();
+    seedFile('/test-project/afile', 'not a directory');
+    const { deps } = makeCapture();
+
+    let thrown: unknown;
+    try {
+      await runStatus(
+        { profile: 'default', output: 'text', debug: false, dryRun: false, dir },
+        { cwd: CWD, fs: agentFs, ...deps },
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ApiError);
+    expect((thrown as ApiError).exitCode).toBe(5);
+    expect((thrown as ApiError).nextAction).toContain('--dir');
+    expect((thrown as ApiError).nextAction).toContain('is a file');
+  });
+
+  it('translates an ENOTDIR raised under a symlinked root component into exit 5', async () => {
+    // A root passing through a symlink to a FILE: lstat sees the link itself
+    // (not a file), and lstat-ing the next component raises ENOTDIR — the
+    // exact shape the real fs produces for `--dir link-to-file/sub`.
+    const enotdirFs: AgentFs = {
+      async lstat(p: string) {
+        if (p === '/proj') return { isFile: false, isSymbolicLink: false };
+        if (p === '/proj/link') return { isFile: false, isSymbolicLink: true };
+        throw Object.assign(new Error(`ENOTDIR: not a directory, lstat '${p}'`), {
+          code: 'ENOTDIR',
+        });
+      },
+      async readFile() {
+        throw new Error('unreachable');
+      },
+      async writeFile() {
+        throw new Error('unreachable');
+      },
+      async mkdir() {
+        throw new Error('unreachable');
+      },
+    };
+    const { deps } = makeCapture();
+
+    let thrown: unknown;
+    try {
+      await runInstall(
+        { ...installOpts, dir: '/proj/link/sub' },
+        { cwd: CWD, fs: enotdirFs, ...deps },
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ApiError);
+    expect((thrown as ApiError).exitCode).toBe(5);
+    expect((thrown as ApiError).nextAction).toContain('passes through a file');
+  });
+
+  it('still installs when --dir is a symlink to a directory', async () => {
+    const { store, fs: agentFs, seedSymlink } = makeMemFs();
+    seedSymlink('/linkroot');
+    const { deps } = makeCapture();
+
+    await runInstall({ ...installOpts, dir: '/linkroot' }, { cwd: CWD, fs: agentFs, ...deps });
+
+    const { path: relPath, content } = renderForTarget('claude', 'testsprite-verify');
+    expect(store.get(path.resolve('/linkroot', relPath))).toBe(content);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runInstall — unknown target
 // ---------------------------------------------------------------------------
 

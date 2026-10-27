@@ -128,6 +128,47 @@ async function inspectTargetPath(
 }
 
 /**
+ * Validate the resolved `--dir` root itself before anything walks beneath it.
+ * `inspectTargetPath` checks every component BELOW the root, but a root that
+ * IS a regular file — or passes through one (`--dir afile`, `--dir
+ * afile/sub`) — makes the first `lstat` under it throw a raw `ENOTDIR`,
+ * which escapes as an uncaught exit-1 crash instead of the typed
+ * VALIDATION_ERROR (exit 5) every other bad `--dir` gets. Walk the root's
+ * own components: a regular-file component is a validation error, an
+ * `ENOTDIR` raised while lstat-ing a deeper component (a component above
+ * resolved through a file, e.g. a symlink to one) is the same error, and a
+ * missing component ends the walk — the tail does not exist yet and install
+ * may create it. Symlink components pointing at directories stay allowed,
+ * exactly as today.
+ */
+async function assertAgentRootDir(agentFs: AgentFs, root: string): Promise<void> {
+  const { root: anchor } = path.parse(root);
+  const segments = root
+    .slice(anchor.length)
+    .split(/[/\\]+/)
+    .filter(Boolean);
+  let current = anchor;
+  for (const seg of segments) {
+    current = path.join(current, seg);
+    let ls: Awaited<ReturnType<AgentFs['lstat']>>;
+    try {
+      ls = await agentFs.lstat(current);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        throw localValidationError('dir', `must be a directory: "${root}" passes through a file`);
+      }
+      throw err;
+    }
+    if (ls === null) {
+      return;
+    }
+    if (ls.isFile) {
+      throw localValidationError('dir', `must be a directory: "${current}" is a file`);
+    }
+  }
+}
+
+/**
  * Back up the current bytes at `abs` next to it without clobbering any existing
  * backup or writing through a symlink. Exclusive create (`wx`) fails with
  * EEXIST on an existing regular file OR symlink, so we walk `.bak`, `.bak.1`,
@@ -417,6 +458,10 @@ export async function runInstall(opts: InstallOptions, deps: AgentDeps = {}): Pr
 
   // Where the install lands, and so where detection looks (reused at step 3).
   const dir = opts.dir ?? deps.cwd ?? process.cwd();
+
+  // The root itself must be usable as a directory before detection (which
+  // probes under it) or any target work touches paths beneath it.
+  await assertAgentRootDir(agentFs, path.resolve(dir));
 
   if (rawTargets.length === 0) {
     // No target named: install for the agents this project shows rather than a
@@ -1084,6 +1129,7 @@ export async function runStatus(opts: StatusOptions, deps: AgentDeps = {}): Prom
   }
   const dir = opts.dir !== undefined ? opts.dir.trim() : (deps.cwd ?? process.cwd());
   const root = path.resolve(dir);
+  await assertAgentRootDir(agentFs, root);
 
   // The SAME resolver the installer stamps its marker hashes from — a
   // separate copy here is exactly how install and status end up disagreeing.
