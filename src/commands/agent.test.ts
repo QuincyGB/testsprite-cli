@@ -45,10 +45,20 @@ function makeMemFs(): {
   const mkdirCalls: string[] = [];
   const writeCalls: string[] = [];
 
+  // Key every entry by its platform-resolved form. Node's path layer
+  // re-anchors a rooted path to the current drive on Windows ('/proj' ->
+  // 'D:\proj') and joins components with backslashes, so an entry seeded
+  // under a POSIX literal lives at the resolved path there — which is
+  // exactly the string the code under test probes with. Resolving at the
+  // double's boundary models that anchoring, so seeded entries are found
+  // on both platforms. (path.resolve is idempotent, so the already-resolved
+  // paths most callers pass are unaffected.)
+  const key = (p: string) => path.resolve(p);
+
   // Record `p` and all of its ancestors as directories, modelling a real fs
   // tree so the per-component lstat walk in inspectTargetPath can traverse.
   const addAncestorDirs = (p: string) => {
-    let cur = path.dirname(p);
+    let cur = path.dirname(key(p));
     while (cur !== path.dirname(cur)) {
       dirs.add(cur);
       cur = path.dirname(cur);
@@ -58,35 +68,39 @@ function makeMemFs(): {
 
   const agentFs: AgentFs = {
     async lstat(p: string) {
-      if (symlinks.has(p)) return { isFile: false, isSymbolicLink: true };
-      if (store.has(p)) return { isFile: true, isSymbolicLink: false };
-      if (dirs.has(p)) return { isFile: false, isSymbolicLink: false };
+      const k = key(p);
+      if (symlinks.has(k)) return { isFile: false, isSymbolicLink: true };
+      if (store.has(k)) return { isFile: true, isSymbolicLink: false };
+      if (dirs.has(k)) return { isFile: false, isSymbolicLink: false };
       return null;
     },
     async stat(p: string) {
       // Follows symlinks. This model does not track link targets; seeded
       // symlinks stand for links to directories (see the seedSymlink callers).
-      if (store.has(p)) return { isFile: true };
-      if (dirs.has(p) || symlinks.has(p)) return { isFile: false };
+      const k = key(p);
+      if (store.has(k)) return { isFile: true };
+      if (dirs.has(k) || symlinks.has(k)) return { isFile: false };
       return null;
     },
     async readFile(p: string) {
-      const v = store.get(p);
+      const v = store.get(key(p));
       if (v === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
       return v;
     },
     async writeFile(p: string, data: string, opts?: { exclusive?: boolean }) {
-      if (opts?.exclusive && (store.has(p) || dirs.has(p) || symlinks.has(p))) {
+      const k = key(p);
+      if (opts?.exclusive && (store.has(k) || dirs.has(k) || symlinks.has(k))) {
         throw Object.assign(new Error(`EEXIST: ${p}`), { code: 'EEXIST' });
       }
       writeCalls.push(p);
-      store.set(p, data);
-      addAncestorDirs(p);
+      store.set(k, data);
+      addAncestorDirs(k);
     },
     async mkdir(p: string) {
+      const k = key(p);
       mkdirCalls.push(p);
-      dirs.add(p);
-      addAncestorDirs(p);
+      dirs.add(k);
+      addAncestorDirs(k);
     },
   };
 
@@ -96,15 +110,15 @@ function makeMemFs(): {
     mkdirCalls,
     writeCalls,
     seedFile: (p, content) => {
-      store.set(p, content);
+      store.set(key(p), content);
       addAncestorDirs(p);
     },
     seedDir: p => {
-      dirs.add(p);
+      dirs.add(key(p));
       addAncestorDirs(p);
     },
     seedSymlink: p => {
-      symlinks.add(p);
+      symlinks.add(key(p));
       addAncestorDirs(p);
     },
   };
@@ -584,15 +598,19 @@ describe('agent --dir naming a file', () => {
     // `--dir link-to-file/sub`. (lstat-ing the next component would raise
     // ENOTDIR, but the stat check on the link itself fires first.)
     const enotdirFs: AgentFs = {
+      // Compare against resolved paths: the walk builds its probes with
+      // path.join from the resolved root, which carries the current drive
+      // on Windows ('D:\proj'), so literal POSIX matches would never hit
+      // there. (path.resolve is the identity for these on POSIX.)
       async lstat(p: string) {
-        if (p === '/proj') return { isFile: false, isSymbolicLink: false };
-        if (p === '/proj/link') return { isFile: false, isSymbolicLink: true };
+        if (p === path.resolve('/proj')) return { isFile: false, isSymbolicLink: false };
+        if (p === path.resolve('/proj/link')) return { isFile: false, isSymbolicLink: true };
         throw Object.assign(new Error(`ENOTDIR: not a directory, lstat '${p}'`), {
           code: 'ENOTDIR',
         });
       },
       async stat(p: string) {
-        if (p === '/proj/link') return { isFile: true };
+        if (p === path.resolve('/proj/link')) return { isFile: true };
         throw new Error('unreachable');
       },
       async readFile() {
